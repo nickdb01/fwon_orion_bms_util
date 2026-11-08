@@ -187,8 +187,8 @@ private final class UnsupportedLiveTransport: DiagnosticTransport {
     #expect(abs(loaded.snapshots[0].finishedAt.timeIntervalSince(snapshot.finishedAt)) < 0.001)
 }
 
-// Frames captured from the connected ORIONBMS04 (firmware 3.7.2), 8 Nov 2026.
-private final class CapturedJuniorCellsTransport: DiagnosticTransport {
+// Synthetic two-bank replies exercise the zero-count layout fallback.
+private final class ZeroCountCellsTransport: DiagnosticTransport {
     var trace: [TraceEntry] = []
     let demo = DemoTransport()
     var rejectParameters = false
@@ -200,47 +200,47 @@ private final class CapturedJuniorCellsTransport: DiagnosticTransport {
         case .parameter(.maximumCells): frame = ":0462F00600\n"
         case .parameter where rejectParameters: throw BMSError.unsupported(0x11)
         case .cellFlag(.populated): frame = malformedPopulation ? ":02F000\n" : ":04F000FFFF\n"
-        case .cells(.voltage, 0): frame = ":1B62F100824D82698291828F832D8297825882598244825F8266828E\n"
-        case .cells(.voltage, 1): frame = ":1B62F101830F82DB8284829B00000000000000000000000000000000\n"
-        case .cells(.resistance, 0): frame = ":1B62F200000E000E0011000E000C000C00110010000D00130010000D\n"
-        case .cells(.resistance, 1): frame = ":1B62F201000C000D0011001000000000000000000000000000000000\n"
-        case .cells(.openVoltage, 0): frame = ":1B62F3008269828382A1828382A0827D827182698263827482748281\n"
-        case .cells(.openVoltage, 1): frame = ":1B62F3018295828C8270827400000000000000000000000000000000\n"
+        case .cells(.voltage, 0): frame = ":1B62F10080E880F280FC81068110811A8124812E81388142814C8156\n"
+        case .cells(.voltage, 1): frame = ":1B62F1018160816A8174817E00000000000000000000000000000000\n"
+        case .cells(.resistance, 0): frame = ":1B62F200000A000B000C000D000E000F001000110012001300140015\n"
+        case .cells(.resistance, 1): frame = ":1B62F201001600170018001900000000000000000000000000000000\n"
+        case .cells(.openVoltage, 0): frame = ":1B62F300814C81568160816A8174817E81888192819C81A681B081BA\n"
+        case .cells(.openVoltage, 1): frame = ":1B62F30181C481CE81D881E200000000000000000000000000000000\n"
         default: return try demo.exchange(request)
         }
         var parser = FrameParser()
         return try parser.feed(Data(frame!.utf8))[0].get()
     }
 }
-@Test func physicalJuniorZeroCountUsesPopulationAndDecodesAllSixteenCells() throws {
-    let transport = CapturedJuniorCellsTransport(), reader = LiveReader(transport: transport)
-    let device = DeviceInfo(signature: "ORIONBMS04", firmware: "030702", port: "Captured fixture", isDemo: false)
+@Test func zeroCountJuniorUsesPopulationAndDecodesAllSixteenCells() throws {
+    let transport = ZeroCountCellsTransport(), reader = LiveReader(transport: transport)
+    let device = DeviceInfo(signature: "ORIONBMS04", firmware: "030702", port: "Synthetic fixture", isDemo: false)
     let voltage = try reader.sample(device: device)
     #expect(voltage.cells.count == 16)
     #expect(voltage.cells.allSatisfy { $0.populated == true && $0.voltage != nil })
-    #expect(abs(voltage.cells[0].voltage! - 3.3357) < 0.000001)
-    #expect(abs(voltage.cells[15].voltage! - 3.3435) < 0.000001)
+    #expect(abs(voltage.cells[0].voltage! - 3.3000) < 0.000001)
+    #expect(abs(voltage.cells[15].voltage! - 3.3150) < 0.000001)
     #expect(voltage.notes.contains { $0.contains("population bitmap") })
     let resistance = try reader.sample(device: device, quantity: .resistance)
-    #expect(resistance.cells[0].resistance == 0.14)
-    #expect(resistance.cells[15].resistance == 0.16)
+    #expect(resistance.cells[0].resistance == 0.10)
+    #expect(resistance.cells[15].resistance == 0.25)
     let open = try reader.sample(device: device, quantity: .openVoltage)
-    #expect(abs(open.cells[0].openVoltage! - 3.3385) < 0.000001)
+    #expect(abs(open.cells[0].openVoltage! - 3.3100) < 0.000001)
     #expect(open.cells.allSatisfy { $0.openVoltage != nil })
 }
 @Test func cellReadingsSurviveUnsupportedOverviewParameters() throws {
-    let transport = CapturedJuniorCellsTransport(); transport.rejectParameters = true
+    let transport = ZeroCountCellsTransport(); transport.rejectParameters = true
     let reader = LiveReader(transport: transport)
-    let device = DeviceInfo(signature: "ORIONBMS04", port: "Captured fixture", isDemo: false)
+    let device = DeviceInfo(signature: "ORIONBMS04", port: "Synthetic fixture", isDemo: false)
     let snapshot = try reader.sample(device: device)
     #expect(snapshot.readings.allSatisfy { $0.value == nil })
     #expect(snapshot.cells.count == 16)
     #expect(snapshot.cells.allSatisfy { $0.voltage != nil })
 }
 @Test func zeroCellCountWithoutPopulationDoesNotInventCellReadings() throws {
-    let transport = CapturedJuniorCellsTransport(); transport.malformedPopulation = true
+    let transport = ZeroCountCellsTransport(); transport.malformedPopulation = true
     let reader = LiveReader(transport: transport)
-    let device = DeviceInfo(signature: "ORIONBMS04", port: "Captured fixture", isDemo: false)
+    let device = DeviceInfo(signature: "ORIONBMS04", port: "Synthetic fixture", isDemo: false)
     let snapshot = try reader.sample(device: device)
     #expect(snapshot.cells.isEmpty)
     #expect(snapshot.notes.contains { $0.contains("Cell layout") })

@@ -4,7 +4,7 @@ Native macOS monitoring and diagnostics for Orion Junior BMS devices. Current ve
 
 ## Download and run
 
-[Download Orion Diagnostics v0.2.5 for macOS](https://github.com/nickdb01/fwon_orion_bms_util/raw/refs/heads/main/downloads/Orion-Diagnostics-v0.2.5-macOS.zip)
+[Download Orion Diagnostics v0.2.5 for macOS](downloads/Orion-Diagnostics-v0.2.5-macOS.zip)
 
 Unzip the archive and open **Orion Diagnostics.app**. The application is ad-hoc signed; Developer ID signing and notarization have not been performed.
 
@@ -34,7 +34,7 @@ Event timestamps are cumulative BMS operating seconds, not historical calendar d
 
 Missing or unsupported measurements remain unavailable. Read requests use bounded retries and cancellation checks. Recent raw replies and section statuses are retained in diagnostic exports. Empty fault lists must be interpreted alongside download status.
 
-The reader recognizes signatures `ORIONBMS03` through `ORIONBMS08`, including `ORIONBMS04`. Device signature and firmware are displayed without inferring the exact product generation. Physical voltage and resistance reads have been exercised on an `ORIONBMS04` unit with firmware 3.7.2; broader device/firmware acceptance remains incomplete.
+The reader recognizes signatures `ORIONBMS03` through `ORIONBMS08`, including `ORIONBMS04`. Device signature and firmware are displayed without inferring the exact product generation. Compatibility varies by device and firmware; broader hardware acceptance remains incomplete.
 
 Recordings preserve per-signal timestamps, raw replies and device identity. The live/replay buffer retains up to 2,000 polling cycles. Recording files stop at 100 MB; file rotation and full-file indexing are not implemented. Incomplete final recording lines can be recovered.
 
