@@ -1,6 +1,6 @@
 # Orion Diagnostics for macOS
 
-Native macOS monitoring and diagnostics for Orion Junior BMS devices. Current version: **0.2.5**. Supports macOS 14 or later on Apple Silicon and Intel.
+Native macOS monitoring and diagnostics for Orion Junior BMS devices, as used in Freedom Won Lite batteries. Current version: **0.2.5**. Supports macOS 14 or later on Apple Silicon and Intel.
 
 ## Download and run
 
