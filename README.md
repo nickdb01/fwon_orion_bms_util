@@ -42,6 +42,8 @@ Profile editing, service writes, histogram distributions, legacy vendor-log impo
 
 ## Build and test
 
+**New to building Mac apps?** Follow the [beginner build and local-signing guide](docs/BUILDING-AND-SIGNING.md) for setup, Apple Silicon/Intel builds, signing without a developer account, certificate signing and troubleshooting.
+
 Requires Xcode with Swift 6 or later. The application has no third-party package dependencies and does not require Java.
 
 ```sh
