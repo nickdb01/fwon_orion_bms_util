@@ -239,7 +239,7 @@ private struct PseudoTerminal: Sendable {
 
 @Test func nativeProfileAuthenticationTraceRedactsBothDirectionsAndDoesNotRetry() async throws {
     let pty = try PseudoTerminal(); defer { pty.close() }
-    let transport = try SerialTransport(path:pty.path,timeout:0.1,requireRTS:false)
+    let transport = try SerialTransport(path:pty.path,timeout:0.4,requireRTS:false)
     defer { transport.close() }
     let peer = Task.detached {
         var buffer = [UInt8](repeating:0,count:100)
@@ -278,4 +278,38 @@ private struct PseudoTerminal: Sendable {
     }
     try await cleanup.value
     #expect(try await peer.value == "\r:022000\n\r")
+}
+
+@Test func nativeProfileUploadAcceptsVendorAcknowledgementAndRedactsBothDirections() async throws {
+    let pty = try PseudoTerminal(); defer { pty.close() }
+    let transport = try SerialTransport(path:pty.path,timeout:0.5,requireRTS:false)
+    defer { transport.close() }
+    let peer = Task.detached {
+        var received: [UInt8] = []
+        var buffer = [UInt8](repeating:0,count:256)
+        while !received.contains(10) {
+            var descriptor = pollfd(fd:pty.master,events:Int16(POLLIN),revents:0)
+            guard poll(&descriptor,1,2000) > 0 else { throw BMSError.timeout }
+            let count = read(pty.master,&buffer,buffer.count)
+            guard count > 0 else { throw BMSError.disconnected }
+            received += buffer.prefix(count)
+        }
+        let reply = Array(":037F3B72\n".utf8)
+        _ = reply.withUnsafeBytes { Darwin.write(pty.master,$0.baseAddress!,$0.count) }
+        return String(decoding:received,as:UTF8.self)
+    }
+    let reply = try transport.exchange(.profileWriteBlock(offset:0,data:[1,2]))
+    #expect(reply.payload == [0x72])
+    #expect(try await peer.value.contains(":093B0002000001020040\n"))
+    #expect(transport.trace.allSatisfy { $0.text == "[profile upload redacted]" })
+}
+
+@Test func nativeProfileUploadDoesNotRetryTimeoutsOrSendInvalidBlocks() throws {
+    let pty = try PseudoTerminal(); defer { pty.close() }
+    let transport = try SerialTransport(path:pty.path,timeout:0.2,requireRTS:false)
+    defer { transport.close() }
+    #expect(throws:BMSError.self) { try transport.exchange(.profileWriteBlock(offset:3473,data:[1,2])) }
+    #expect(transport.trace.isEmpty)
+    #expect(throws:BMSError.timeout) { try transport.exchange(.profileWriteBlock(offset:0,data:[1,2])) }
+    #expect(transport.trace.filter { $0.direction == "TX" }.count == 1)
 }

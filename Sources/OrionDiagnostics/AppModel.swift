@@ -42,6 +42,10 @@ enum ChartPreset: String, CaseIterable, Identifiable {
     var profileDownloading = false
     var profileNeedsPassword = false
     var profileAuthMessage = "Enter the BMS profile password. It will not be saved."
+    var profileDraft: ProfileDraft?
+    var profileUploading = false
+    var profileUploadReview = false
+    var profileBackupURL: URL?
     var history: HistoricalSnapshot?
     var latest: LiveSnapshot?
     var snapshots: [LiveSnapshot] = []
@@ -64,8 +68,9 @@ enum ChartPreset: String, CaseIterable, Identifiable {
     private let service = DiagnosticService()
     private var operation: Task<Void, Never>?
     @ObservationIgnored private let portProvider: () -> [SerialPortInfo]
-    init(portProvider: @escaping () -> [SerialPortInfo] = SerialPortInfo.available) {
-        self.portProvider = portProvider; refreshPorts()
+    @ObservationIgnored private let profileBackupDirectory: URL?
+    init(portProvider: @escaping () -> [SerialPortInfo] = SerialPortInfo.available, profileBackupDirectory: URL? = nil) {
+        self.portProvider = portProvider; self.profileBackupDirectory = profileBackupDirectory; refreshPorts()
     }
     func refreshPorts(silent: Bool = false) {
         guard !shuttingDown else { return }
@@ -109,7 +114,7 @@ enum ChartPreset: String, CaseIterable, Identifiable {
                 let connected = try await service.connect(path: path, demo: demo, demoProfilePassword:demoProfilePassword)
                 try Task.checkCancellation()
                 guard generation == connectionGeneration else { throw CancellationError() }
-                device = connected; profileSnapshot = nil; profileNeedsPassword = false; report = nil; sourceLabel = ""; query = ""
+                device = connected; profileSnapshot = nil; profileDraft = nil; profileNeedsPassword = false; report = nil; sourceLabel = ""; query = ""
                 status = demo ? "Demo connected — all records are synthetic" : "Connected · ready to download"
                 latest = nil; snapshots = []; openedRecording = nil; page = demoProfilePassword == nil ? .overview : .profile
                 startMonitoring(force: true)
@@ -395,16 +400,16 @@ extension AppModel {
                         self.progress = update.fraction; self.status = update.message
                     }
                 }
-                profileSnapshot = result; progress = 1
+                profileSnapshot = result; profileDraft = nil; progress = 1
                 status = result.device.isDemo ? "Synthetic demo profile downloaded" : "Profile downloaded · settings unchanged"
             } catch {
                 if !(await service.isConnected()) { device = nil }
                 if let access = error as? ProfileAccessError {
                     switch access {
-                    case .passwordRequired, .invalidPassword, .passwordFormat:
+                    case .passwordRequired, .invalidPassword, .passwordFormat, .unexpectedAuthenticationReply:
                         profileAuthMessage = access.localizedDescription
                         profileNeedsPassword = device != nil
-                        status = "Profile locked · password required"
+                        status = "Profile authentication incomplete · review details"
                     default: errorMessage = access.localizedDescription; status = "Profile download failed"
                     }
                 } else if error is CancellationError { status = "Profile download cancelled · previous profile retained" }
@@ -416,7 +421,7 @@ extension AppModel {
         guard let profileSnapshot, !busy else { return }
         let panel = NSSavePanel(); panel.allowedContentTypes = [.json]
         panel.nameFieldStringValue = "Orion-Profile.json"
-        panel.message = "Saves the complete downloaded profile and decoded core settings. This is a read-only backup, not a vendor .j2bms upload file."
+        panel.message = "Saves the complete downloaded profile and decoded core settings. This saves the last read profile; use Save Draft for staged changes. Supported JSON backups can be imported for a reviewed upload."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
@@ -424,5 +429,77 @@ extension AppModel {
             try encoder.encode(profileSnapshot).write(to:url,options:.atomic)
             status = "Profile backup saved locally"
         } catch { errorMessage = error.localizedDescription }
+    }
+}
+
+extension AppModel {
+    func beginProfileEditing() {
+        guard !shuttingDown, !busy, let profileSnapshot else { return }
+        do { profileDraft = try ProfileDraft(baseline:profileSnapshot) }
+        catch { errorMessage = error.localizedDescription }
+    }
+    func changeProfileSetting(_ id: String, value: String) throws {
+        guard !busy, var draft = profileDraft else { return }
+        try draft.setDisplayValue(value,for:id); profileDraft = draft
+    }
+    func importProfile() {
+        guard !shuttingDown, !busy, let profileSnapshot else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json,.xml,UTType(filenameExtension:"j2bms") ?? .data,UTType(filenameExtension:"j2ps") ?? .data,UTType(filenameExtension:"hex") ?? .text]
+        panel.allowsMultipleSelection = false
+        panel.message = "Stage an Orion JSON backup or a supported 3.0 vendor profile. Review is required before any BMS write."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            var draft = try ProfileDraft(baseline:profileSnapshot)
+            let bytes = try ProfileFiles.read(url,for:profileSnapshot)
+            try draft.replace(with:bytes,source:url.lastPathComponent)
+            profileDraft = draft; status = "Profile imported into a local draft · BMS settings unchanged"
+        } catch { errorMessage = error.localizedDescription }
+    }
+    func saveProfileDraft() {
+        guard !shuttingDown, !busy, let draft = profileDraft else { return }
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.json]; panel.nameFieldStringValue = "Orion-Profile-Draft.json"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try ProfileFiles.save(draft.snapshot,to:url); status = "Profile draft saved locally" }
+        catch { errorMessage = error.localizedDescription }
+    }
+    func reviewProfileUpload() {
+        guard !shuttingDown, !busy, device != nil, let draft = profileDraft else { return }
+        do { try draft.validateForUpload(); profileUploadReview = true }
+        catch { errorMessage = error.localizedDescription }
+    }
+    func uploadProfile(password: String?) {
+        guard !shuttingDown, !busy, device != nil, let draft = profileDraft, profileUploadReview else { return }
+        do { try draft.validateForUpload() } catch { errorMessage = error.localizedDescription; return }
+        profileUploadReview = false
+        let resume = isMonitoring
+        let profileDevice = device
+        stopMonitoring(); busy = true; profileUploading = true; progress = 0; errorMessage = nil
+        let folder = profileBackupDirectory ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
+            .appendingPathComponent(profileDevice?.isDemo == true ? "OrionDiagnostics/DemoProfileBackups" : "OrionDiagnostics/ProfileBackups",isDirectory:true)
+        let backup = folder.appendingPathComponent("Before-Upload-\(UUID().uuidString).json")
+        operation = Task {
+            defer { busy = false; profileUploading = false; recordingURL = nil; operation = nil; if resume && device != nil { startMonitoring() } }
+            do {
+                let receipt = try await service.uploadProfile(draft,password:password,backupURL:backup) { [weak self] update in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.profileUploading else { return }
+                        self.progress = update.fraction; self.status = update.message
+                    }
+                }
+                profileSnapshot = receipt.verifiedProfile; profileDraft = nil; profileBackupURL = receipt.backupURL
+                latest = nil; snapshots = []; history = nil
+                progress = 1; status = "Profile uploaded · full read-back verified · original backup saved"
+            } catch {
+                if FileManager.default.fileExists(atPath:backup.path) { profileBackupURL = backup }
+                errorMessage = error.localizedDescription
+                status = error is ProfileUploadFailure ? "Upload incomplete · reconnect and read the active profile" : "Profile not uploaded · review the error message"
+                if !(await service.isConnected()) { device = nil; latest = nil; snapshots = []; recordingURL = nil }
+            }
+        }
+    }
+    func revealProfileBackup() {
+        guard let profileBackupURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([profileBackupURL])
     }
 }

@@ -12,10 +12,21 @@ private final class ProfileFixtureTransport: DiagnosticTransport {
     var statusUnsupported = false
     var closed = false
     var cancelAfterBlock = false
+    var authenticationReply: [UInt8]?
+    var challengeError: BMSError?
+    var challengeReply: [UInt8]?
     init(password: String? = nil) { demo = DemoTransport(profilePassword:password) }
     func close() { closed = true; demo.close() }
     func exchange(_ request: ReadRequest) throws -> WireReply {
         requests.append(request)
+        if request == .profileChallenge, let challengeError { throw challengeError }
+        if request == .profileChallenge, let challengeReply {
+            return try WireReply(bytes:[UInt8(challengeReply.count+2),0x67,5] + challengeReply)
+        }
+        if case .profileAuthenticate = request, let authenticationReply {
+            _ = try demo.exchange(request)
+            return try WireReply(bytes:[UInt8(authenticationReply.count+2),0x67,6] + authenticationReply)
+        }
         if request == .profileLockStatus, statusUnsupported { throw BMSError.unsupported(0x11) }
         let reply = try demo.exchange(request)
         if case .profileBlock = request {
@@ -116,5 +127,90 @@ private final class ProfileFixtureTransport: DiagnosticTransport {
     #expect(try ProfileDecoder.passwordKey("abc") == [97,98,99,0,0,0,0,0])
     for password in ["", "123456789", "päss"] {
         #expect(throws:ProfileAccessError.self) { try ProfileDecoder.passwordKey(password) }
+    }
+}
+
+@Test func unexpectedAuthenticationAcknowledgementIsNotCalledPasswordRejection() throws {
+    for payload: [UInt8] in [[], [0], [0,1], [1,0], [0,1,0,0,0,0,0,0]] {
+        let transport = ProfileFixtureTransport(password:"testpass")
+        transport.authenticationReply = payload
+        var details: [String] = []
+        do {
+            _ = try ProfileReader(transport:transport).read(device:profileDevice,password:"testpass",diagnostic:{ details.append($0) }) { _ in }
+            Issue.record("Expected unexpected reply")
+        } catch ProfileAccessError.unexpectedAuthenticationReply(let stage,let count) {
+            #expect(stage == "password acknowledgement")
+            #expect(count == payload.count)
+        } catch { Issue.record("Misclassified reply: \(error)") }
+        #expect(details.contains { $0.contains("unexpected status or length") })
+        #expect(details.last == "Session re-lock confirmed.")
+    }
+}
+
+@Test func explicitPasswordRejectionReportsCodeAndStageWithoutAuthenticationValues() throws {
+    let transport = ProfileFixtureTransport(password:"testpass")
+    var details: [String] = []
+    do {
+        _ = try ProfileReader(transport:transport).read(device:profileDevice,password:"wrong",diagnostic:{ details.append($0) }) { _ in }
+        Issue.record("Expected rejection")
+    } catch ProfileAccessError.invalidPassword {
+        #expect(ProfileAccessError.invalidPassword.localizedDescription.contains("0x35"))
+    } catch { Issue.record("Unexpected \(error)") }
+    let summary = details.joined(separator:"\n")
+    #expect(summary.contains("Password response (0x27/06): BMS negative response 0x35"))
+    for secret in ["testpass", "wrong", "1223344556677819", "7465737470617373", "77726F6E67000000"] {
+        #expect(!summary.contains(secret))
+    }
+    #expect(details.last == "Session re-lock confirmed.")
+}
+
+@Test func challengeRejectionAndTimeoutDoNotImplyPasswordWasSent() throws {
+    for failure: BMSError in [.rejected(0x35), .rejected(0x36), .rejected(0x37), .timeout] {
+        let transport = ProfileFixtureTransport(password:"testpass")
+        transport.challengeError = failure
+        var details: [String] = []
+        do {
+            _ = try ProfileReader(transport:transport).read(device:profileDevice,password:"testpass",diagnostic:{ details.append($0) }) { _ in }
+            Issue.record("Expected challenge failure")
+        } catch let error as BMSError { #expect(error == failure) }
+        catch { Issue.record("Challenge failure misclassified: \(error)") }
+        #expect(!transport.requests.contains { if case .profileAuthenticate = $0 { true } else { false } })
+        #expect(details.contains { $0.hasPrefix("Authentication challenge (0x27/05):") && ($0.contains("negative response") || $0.contains("timed out")) })
+        #expect(details.last == "Session re-lock confirmed.")
+    }
+}
+
+@Test func malformedChallengeIsReportedBeforeAnyPasswordResponseIsSent() throws {
+    for count in [0,2,7,9] {
+        let transport = ProfileFixtureTransport(password:"testpass")
+        transport.challengeReply = [UInt8](repeating:0xAB,count:count)
+        var details: [String] = []
+        do {
+            _ = try ProfileReader(transport:transport).read(device:profileDevice,password:"testpass",diagnostic:{ details.append($0) }) { _ in }
+            Issue.record("Expected malformed challenge")
+        } catch ProfileAccessError.unexpectedAuthenticationReply(let stage,let size) {
+            #expect(stage == "challenge")
+            #expect(size == count)
+        } catch { Issue.record("Unexpected \(error)") }
+        #expect(!transport.requests.contains { if case .profileAuthenticate = $0 { true } else { false } })
+        #expect(details.contains("Authentication challenge (0x27/05): reply received (\(count) payload bytes)."))
+        #expect(!details.joined().contains("ABAB"))
+    }
+}
+
+@Test func profileAuthenticationAcceptsExtendedAcknowledgementsUsingLeadingStatus() throws {
+    // Synthetic payloads: the reference checks only the first two status bytes.
+    for payload: [UInt8] in [[0,0], [0,0,0], [0,0,0,0,0,0,0,0], [0,0,0xAB,0xCD,0xEF,0x98,0x76,0x54]] {
+        let transport = ProfileFixtureTransport(password:"testpass")
+        transport.authenticationReply = payload
+        var details: [String] = []
+        let profile = try ProfileReader(transport:transport).read(device:profileDevice,password:"testpass",diagnostic:{ details.append($0) }) { _ in }
+        #expect(profile.authenticated)
+        #expect(profile.data.count == ProfileDecoder.byteCount)
+        #expect(details.contains("Password response (0x27/06): reply received (\(payload.count) payload bytes)."))
+        #expect(details.contains("Authentication access confirmed."))
+        #expect(details.contains("Session re-lock confirmed."))
+        #expect(!details.joined().contains("ABCDEF987654"))
+        #expect(try transport.demo.exchange(.profileLockStatus).payload[1] == 0)
     }
 }

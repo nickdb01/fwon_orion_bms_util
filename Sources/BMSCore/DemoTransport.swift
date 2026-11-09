@@ -7,8 +7,14 @@ final class DemoTransport: DiagnosticTransport {
     private let signature: String
     private let profilePassword: String?
     private var profileUnlocked = false
+    private var profileWritable = false
+    private var savedProfile = DemoTransport.profileData()
+    private var stagedProfile: [UInt8] = []
     private let profileChallenge: [UInt8] = [0x12,0x23,0x34,0x45,0x56,0x67,0x78,0x19]
-    init(signature: String = "ORIONBMS08", profilePassword: String? = nil) { self.signature = signature; self.profilePassword = profilePassword }
+    init(signature: String = "ORIONBMS08", profilePassword: String? = nil, profileData: [UInt8]? = nil) {
+        self.signature = signature; self.profilePassword = profilePassword
+        if let profileData { savedProfile = profileData }
+    }
     func close() { closed = true }
     func exchange(_ request: ReadRequest) throws -> WireReply {
         guard !closed else { throw BMSError.disconnected }
@@ -21,10 +27,21 @@ final class DemoTransport: DiagnosticTransport {
             let key = try ProfileDecoder.passwordKey(profilePassword ?? "demo")
             guard response == zip(profileChallenge,key).map({ $0 ^ $1 }) else { throw BMSError.rejected(0x35) }
             profileUnlocked = true; body = [0x67,6,0,0]
-        case .profileRelock: profileUnlocked = false; body = [0x60,0]
+        case .profileWriteChallenge: body = [0x67,1,0x45,0x67]
+        case .profileWriteAuthenticate(let response):
+            guard response == [0x45 ^ 0x12,0x67 ^ 0x34], profilePassword == nil || profileUnlocked else { throw BMSError.rejected(0x35) }
+            profileWritable = true; stagedProfile = []; body = [0x67,2,0,0,0,0,0,0,0,0]
+        case .profileWriteBlock(let offset, let data):
+            guard profileWritable, Int(offset) == stagedProfile.count, !data.isEmpty, data.count <= 56, stagedProfile.count+data.count <= ProfileDecoder.byteCount else { throw BMSError.rejected(0x33) }
+            stagedProfile += data; body = [0x7F,0x3B,0x72]
+        case .profileCommit:
+            guard profileWritable, stagedProfile.count == ProfileDecoder.byteCount else { throw BMSError.rejected(0x33) }
+            try ProfileDecoder.validate(stagedProfile)
+            savedProfile = stagedProfile; stagedProfile = []; body = [0x7F,0x3B,0x72]
+        case .profileRelock: profileUnlocked = false; profileWritable = false; stagedProfile = []; body = [0x60,0]
         case .profileBlock(let offset, let count):
             guard profilePassword == nil || profileUnlocked else { throw BMSError.rejected(0x33) }
-            let profile = Self.profileData()
+            let profile = savedProfile
             guard count > 0, count <= 56, Int(offset) + Int(count) <= profile.count else { throw BMSError.invalid("invalid profile block") }
             let descriptor: [UInt8] = [0,count,UInt8(offset >> 8),UInt8(truncatingIfNeeded:offset)]
             let data = Array(profile[Int(offset)..<(Int(offset)+Int(count))])
@@ -98,8 +115,8 @@ final class DemoTransport: DiagnosticTransport {
         }
         let raw = [UInt8(body.count)] + body
         if trace.count > 8000 { trace.removeFirst(1000) }
-        trace.append(.init(direction: "TX", text: request.isAuthentication ? "[profile authentication redacted]" : ":" + request.body.hex))
-        trace.append(.init(direction: "RX-DEMO", text: request.isAuthentication ? "[profile authentication redacted]" : ":" + raw.hex))
+        trace.append(.init(direction: "TX", text: request.isAuthentication ? "[profile authentication redacted]" : request.isProfileMutation ? "[profile upload redacted]" : ":" + request.body.hex))
+        trace.append(.init(direction: "RX-DEMO", text: request.isAuthentication ? "[profile authentication redacted]" : request.isProfileMutation ? "[profile upload redacted]" : ":" + raw.hex))
         var parser = FrameParser()
         return try parser.feed(Data((":" + raw.hex + "\r\n").utf8))[0].get()
     }

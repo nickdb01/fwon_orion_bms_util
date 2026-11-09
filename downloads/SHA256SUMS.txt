@@ -1,2 +1,3 @@
 1c3a502341174136be3cc59b6a307ee01ed9fbea10923ad4f661b622fd281f20  Orion-Diagnostics-v0.2.5-macOS.zip
 4cdcddfba40f19c7f3d87cc443c34d6e4c86cf54882da8900704304c56fa98a3  Orion-Diagnostics-v0.3.1-macOS.zip
+d83e72c49aa19654d915642b20faadfc4260908cfb7a68eb399fe7d733b54d97  Orion-Diagnostics-v0.4.1-macOS.zip

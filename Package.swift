@@ -8,6 +8,6 @@ let package = Package(
         .target(name: "CSerial", publicHeadersPath: "include"),
         .target(name: "BMSCore", dependencies: ["CSerial"], linkerSettings: [.linkedFramework("IOKit")]),
         .executableTarget(name: "OrionDiagnostics", dependencies: ["BMSCore"]),
-        .testTarget(name: "BMSCoreTests", dependencies: ["BMSCore", "CSerial", "OrionDiagnostics"])
+        .testTarget(name: "BMSCoreTests", dependencies: ["BMSCore", "CSerial", "OrionDiagnostics"], resources:[.process("Fixtures")])
     ]
 )

@@ -1,23 +1,32 @@
 import Foundation
 
-// Allowlisted reads plus profile authentication/session cleanup; no configuration writes.
+// Explicitly framed diagnostics and profile-session operations.
 public enum ReadRequest: Equatable, Sendable {
     case identify, serialNumber, firmware, faults(FaultStatus), eventHeader, event(UInt8)
     case history
     case profileLockStatus, profileChallenge, profileAuthenticate([UInt8]), profileRelock
     case profileBlock(offset: UInt16, count: UInt8)
+    case profileWriteChallenge, profileWriteAuthenticate([UInt8])
+    case profileWriteBlock(offset: UInt16, data: [UInt8]), profileCommit
     case subcodes(UInt16), freezeDirectory(UInt8), freezeParameter(UInt8, ParameterPID)
     case parameter(ParameterPID), cells(CellQuantity, UInt8), cellFlag(CellFlag)
     public var service: UInt8 {
-        switch self { case .profileLockStatus: 0xB2; case .profileChallenge, .profileAuthenticate: 0x27; case .profileRelock: 0x20; case .profileBlock: 0x3C; case .identify, .serialNumber, .firmware: 9; case .faults(let s): s.service; case .eventHeader, .event, .history: 0xB3; case .parameter, .cells: 0x22; case .cellFlag: 0xB0; case .subcodes: 0x17; case .freezeDirectory, .freezeParameter: 2 }
+        switch self { case .profileWriteChallenge, .profileWriteAuthenticate: 0x27; case .profileWriteBlock, .profileCommit: 0x3B; case .profileLockStatus: 0xB2; case .profileChallenge, .profileAuthenticate: 0x27; case .profileRelock: 0x20; case .profileBlock: 0x3C; case .identify, .serialNumber, .firmware: 9; case .faults(let s): s.service; case .eventHeader, .event, .history: 0xB3; case .parameter, .cells: 0x22; case .cellFlag: 0xB0; case .subcodes: 0x17; case .freezeDirectory, .freezeParameter: 2 }
     }
     public var pid: UInt16? {
-        switch self { case .profileLockStatus: 3; case .profileChallenge: 5; case .profileAuthenticate: 6; case .profileRelock: 0; case .profileBlock: nil; case .identify: 0x0B; case .serialNumber: 0x0A; case .firmware: 4; case .faults: nil; case .history: 1; case .eventHeader, .event: 2; case .parameter(let p): p.rawValue; case .cells(let q, let b): q.rawValue + UInt16(b); case .cellFlag(let f): UInt16(f.rawValue); case .subcodes(let code): code; case .freezeDirectory(let frame), .freezeParameter(let frame,_): UInt16(frame) }
+        switch self { case .profileWriteChallenge: 1; case .profileWriteAuthenticate: 2; case .profileWriteBlock: 0; case .profileCommit: 3; case .profileLockStatus: 3; case .profileChallenge: 5; case .profileAuthenticate: 6; case .profileRelock: 0; case .profileBlock: nil; case .identify: 0x0B; case .serialNumber: 0x0A; case .firmware: 4; case .faults: nil; case .history: 1; case .eventHeader, .event: 2; case .parameter(let p): p.rawValue; case .cells(let q, let b): q.rawValue + UInt16(b); case .cellFlag(let f): UInt16(f.rawValue); case .subcodes(let code): code; case .freezeDirectory(let frame), .freezeParameter(let frame,_): UInt16(frame) }
     }
     var isAuthentication: Bool {
-        switch self { case .profileChallenge, .profileAuthenticate: true; default: false }
+        switch self { case .profileChallenge, .profileAuthenticate, .profileWriteChallenge, .profileWriteAuthenticate: true; default: false }
     }
+    var isProfileMutation: Bool { switch self { case .profileWriteBlock, .profileCommit: true; default: false } }
     public var body: [UInt8] {
+        if case .profileWriteBlock(let offset, let data) = self {
+            let descriptor: [UInt8] = [0,UInt8(truncatingIfNeeded:data.count),UInt8(offset >> 8),UInt8(truncatingIfNeeded:offset)]
+            let sum = ([UInt8(0x3B)] + descriptor + data).reduce(0) { $0+Int($1) }
+            return [UInt8(truncatingIfNeeded:data.count+7),0x3B] + descriptor + data + [UInt8(sum >> 8),UInt8(truncatingIfNeeded:sum)]
+        }
+        if case .profileCommit = self { return [4,0x3B,3,0,0x3E] }
         if case .profileBlock(let offset, let count) = self {
             let descriptor: [UInt8] = [0, count, UInt8(offset >> 8), UInt8(truncatingIfNeeded: offset)]
             let checksum = UInt16(0x3C + descriptor.reduce(0) { $0 + Int($1) })
@@ -29,6 +38,7 @@ public enum ReadRequest: Equatable, Sendable {
             bytes.append(UInt8(truncatingIfNeeded: pid))
         }
         if case .profileAuthenticate(let key) = self { bytes += key }
+        if case .profileWriteAuthenticate(let key) = self { bytes += key }
         if case .event(let index) = self { bytes.append(index) }
         if case .subcodes = self { bytes.append(0) }
         if case .freezeDirectory = self { bytes += [1,2] }
@@ -37,6 +47,7 @@ public enum ReadRequest: Equatable, Sendable {
     }
     public var frame: Data { Data(("\r:" + body.hex + "\n\r").utf8) }
     public func matches(_ reply: WireReply) -> Bool {
+        if isProfileMutation { return reply.service == 0x7F && reply.pid == 0x3B }
         guard reply.service == service &+ 0x40 else { return false }
         if case .profileBlock(let offset, let count) = self {
             return reply.profileDescriptor == (UInt32(count) << 16 | UInt32(offset))

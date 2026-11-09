@@ -79,7 +79,8 @@ public struct TraceEntry: Codable, Identifiable, Equatable, Sendable {
 }
 public struct DiagnosticReport: Codable, Sendable {
     public var schemaVersion = 1
-    public var appVersion = "0.3.1"
+    public static let currentAppVersion = "0.4.1"
+    public var appVersion = DiagnosticReport.currentAppVersion
     public var sessionID = UUID()
     public var acquiredAt = Date()
     public var finishedAt: Date?

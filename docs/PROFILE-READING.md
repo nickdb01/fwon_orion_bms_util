@@ -1,6 +1,6 @@
 # Read the current BMS profile
 
-Available in **macOS build 0.3.1**. This feature reads configuration; it does not transmit changed settings.
+Available in **macOS build 0.3.1**. Read Current Profile reads configuration; it does not transmit changed settings. Local build 0.4.0 adds a separate reviewed edit/upload workflow described in [Profile editing and uploads](PROFILE-EDITING.md).
 
 1. Quit an older copy of Orion Diagnostics and open the downloaded app (or your local build in `dist/`).
 2. Connect to the BMS with the usual USB-to-RS-232 adapter.
@@ -15,7 +15,7 @@ The app checks profile-lock status and prompts when the BMS requires a password.
 
 Passwords are used for the requested operation only. They are not saved to preferences, keychain, diagnostic traces or profile JSON. Both directions of authentication exchanges are redacted from transport logs. The profile itself is an explicit local backup of settings; keep exported files wherever you normally keep configuration backups.
 
-If the app authenticates a session, it sends the reference utility's re-lock command after success, a transfer error, or cancellation. Cancellation does not skip cleanup. If re-locking cannot be confirmed, the connection is closed and a specific error is shown. No profile-write, password-change, reset or calibration commands were added.
+If the app authenticates a session, it sends the reference utility's re-lock command after success, a transfer error, or cancellation. Cancellation does not skip cleanup. If re-locking cannot be confirmed, the connection is closed and a specific error is shown. Reading does not write settings. Profile uploads use a separate review step; password-change, reset and calibration commands are not implemented.
 
 ## Format and limits
 
@@ -23,11 +23,15 @@ If the app authenticates a session, it sends the reference utility's re-lock com
 - Every transfer block is checked for its address, length and checksum. The complete profile checksum must also pass before replacing the displayed snapshot.
 - The viewer names **66 core settings**. Verified voltage scalings are displayed in volts; other fields remain clearly labelled raw configured values until their presentation units are verified.
 - All remaining profile settings and tables are retained in the complete raw view and JSON backup. They are not yet fully interpreted in the settings table.
-- The JSON backup is not a vendor `.j2bms` file and cannot be uploaded by this app.
+- The JSON backup is not a vendor `.j2bms` file. Local build 0.4.0 can import it into a reviewed upload draft.
 - Live polling pauses during a profile transfer and resumes afterward when it was previously running.
 
 ## Offline testing
 
 With no device connected in the app, choose **Diagnostics → Explore Password-Protected Demo** from the menu bar. Open Profile and choose Read Current Profile. The demo password is `demo`. A wrong password is rejected; the correct password downloads clearly labelled synthetic settings. The ordinary offline demo provides an unlocked profile.
 
-The profile reader has automated tests, native pseudo-terminal tests for redaction/cancellation cleanup, and offline request/layout checks against the original Java utility. The Mac password prompt and settings display have been exercised with the protected demo. Physical profile transfer/authentication still needs acceptance testing on the target BMS.
+The profile reader has automated tests, native pseudo-terminal tests for redaction/cancellation cleanup, and offline request/layout checks against the original Java utility. The Mac password prompt and settings display have been exercised with the protected demo. Physical reading/authentication has since been confirmed on a target BMS; upload acceptance is tracked separately.
+
+## Authentication replies
+
+The app distinguishes an explicit password rejection (BMS code **0x35**) from an unexpected authentication reply. It accepts extended acknowledgements when their leading two-byte status is zero, matching the original utility. Short replies and nonzero leading status remain errors. Passwords and challenge/response values are redacted from diagnostic traces.

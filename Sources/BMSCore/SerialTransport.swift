@@ -79,16 +79,19 @@ final class SerialTransport: DiagnosticTransport {
     private func performExchange(_ request: ReadRequest, honourCancellation: Bool) throws -> WireReply {
         func checkCancellation() throws { if honourCancellation { try Task.checkCancellation() } }
         func log(_ entry: TraceEntry) {
-            record(request.isAuthentication ? .init(direction: entry.direction, text: "[profile authentication redacted]") : entry)
+            record(request.isAuthentication ? .init(direction: entry.direction, text: "[profile authentication redacted]") : request.isProfileMutation ? .init(direction:entry.direction,text:"[profile upload redacted]") : entry)
+        }
+        if case .profileWriteBlock(let offset, let data) = request {
+            guard !data.isEmpty, data.count <= 56, Int(offset)+data.count <= ProfileDecoder.byteCount else { throw BMSError.invalid("invalid profile upload block") }
         }
         guard fd >= 0 else { throw BMSError.disconnected }
         var lastError: Error = BMSError.timeout
         // Authentication is attempted once; reads and re-lock cleanup use bounded retries.
-        for attempt in 0..<(request.isAuthentication ? 1 : 2) {
+        for attempt in 0..<(request.isAuthentication || request.isProfileMutation ? 1 : 2) {
             try checkCancellation()
             if attempt > 0 { log(.init(direction: "NOTE", text: "Retrying \(request.body.hex)")) }
             guard orion_serial_flush(fd) == 0 else { throw Self.systemError("Flush input") }
-            let deadline = ProcessInfo.processInfo.systemUptime + timeout
+            let deadline = ProcessInfo.processInfo.systemUptime + (request == .profileCommit ? max(timeout,10) : timeout)
             let bytes = Array(request.frame)
             var offset = 0
             log(.init(direction: "TX", text: ":" + request.body.hex))
@@ -122,6 +125,7 @@ final class SerialTransport: DiagnosticTransport {
                         if reply.service == 0x7F && reply.pid == request.service {
                             let reason = reply.payload[0]
                             if reason == 0x78 { continue } // bounded wait for response pending
+                            if request.isProfileMutation { return reply }
                             if [0x11, 0x12, 0x31].contains(reason) { throw BMSError.unsupported(reason) }
                             throw BMSError.rejected(reason)
                         }

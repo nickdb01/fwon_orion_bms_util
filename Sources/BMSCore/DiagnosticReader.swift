@@ -150,6 +150,18 @@ public actor DiagnosticService {
             throw error
         }
     }
+    public func uploadProfile(_ draft: ProfileDraft, password: String?, backupURL: URL, progress: @Sendable (DownloadProgress) -> Void) throws -> ProfileUploadReceipt {
+        guard let reader, let device = reader.device else { throw BMSError.disconnected }
+        try recorder?.note("Live polling paused for reviewed profile upload")
+        try stopRecording()
+        do {
+            return try ProfileUploader(transport:reader.transport).upload(draft,device:device,password:password,backupURL:backupURL,progress:progress)
+        } catch {
+            if error is ProfileUploadFailure || (error as? BMSError) == .disconnected { disconnect() }
+            if case ProfileAccessError.relockFailed = error { disconnect() }
+            throw error
+        }
+    }
     public func isConnected() -> Bool { reader?.device != nil }
     public func disconnect() {
         try? recorder?.note("Disconnected; recording ended")

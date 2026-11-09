@@ -84,6 +84,7 @@ import Testing
     for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
     #expect(model.profileNeedsPassword)
     #expect(model.profileSnapshot == nil)
+    #expect(model.profileAuthMessage.contains("0x35"))
     model.downloadProfile(password:"demo")
     for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
     #expect(!model.profileNeedsPassword)
@@ -139,4 +140,30 @@ import Testing
     #expect(model.device == nil)
     #expect(!model.isMonitoring)
     #expect(!model.busy)
+}
+
+@Test @MainActor func profileUploadRequiresReviewAndUpdatesOnlyAfterVerifiedReadback() async throws {
+    let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at:folder) }
+    let model = AppModel(portProvider:{ [] },profileBackupDirectory:folder)
+    model.connect(demo:true,demoProfilePassword:"demo")
+    for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
+    model.downloadProfile(password:"demo")
+    for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
+    model.beginProfileEditing()
+    try model.changeProfileSetting("MaximumCellVoltage",value:"3.6")
+    let before = model.profileSnapshot?.data
+    model.uploadProfile(password:"demo") // No review was opened.
+    #expect(!model.profileUploading)
+    #expect(model.profileSnapshot?.data == before)
+    model.reviewProfileUpload()
+    #expect(model.profileUploadReview)
+    model.uploadProfile(password:"demo")
+    for _ in 0..<200 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
+    #expect(model.errorMessage == nil)
+    #expect(model.profileDraft == nil)
+    #expect(model.profileSnapshot?.settings.first { $0.id == "MaximumCellVoltage" }?.rawValue == 36000)
+    #expect(model.profileSnapshot?.data != before)
+    #expect(model.profileBackupURL != nil)
+    await model.prepareToQuit()
 }

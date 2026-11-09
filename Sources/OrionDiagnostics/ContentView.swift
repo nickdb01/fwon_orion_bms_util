@@ -135,14 +135,14 @@ struct ContentView: View {
             }
             Spacer(minLength: 5)
             VStack(alignment: .leading, spacing: 12) {
-                Label("Read-only access", systemImage: "lock.shield").font(.caption.weight(.semibold)).foregroundStyle(teal)
+                Label("Diagnostics & profile service", systemImage: "wrench.and.screwdriver").font(.caption.weight(.semibold)).foregroundStyle(teal)
                 Text("USB → RS-232 → BMS\n9600 baud · 8E1 · RTS enabled")
                     .font(.caption).foregroundStyle(.secondary).lineSpacing(4)
                 if model.device == nil {
                     Button { model.connect(demo: true) } label: { Label("Explore Offline Demo", systemImage: "play.circle") }
                         .buttonStyle(.borderless).disabled(model.busy)
                 }
-                Text("v0.3.1 · Hardware validation pending").font(.system(size: 10)).foregroundStyle(.tertiary)
+                Text("v0.4.1 · Hardware validation pending").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
                 }.padding(20)
             }

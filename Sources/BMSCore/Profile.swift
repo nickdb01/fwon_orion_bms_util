@@ -2,10 +2,13 @@ import Foundation
 
 public enum ProfileAccessError: Error, LocalizedError, Sendable {
     case passwordRequired, invalidPassword, passwordFormat, unsupportedLayout, relockFailed
+    case unexpectedAuthenticationReply(stage: String, byteCount: Int)
     public var errorDescription: String? {
         switch self {
         case .passwordRequired: "The BMS profile is locked. Enter its password to read the settings."
-        case .invalidPassword: "The BMS rejected the password. No automatic password retries were made."
+        case .invalidPassword: "The BMS explicitly rejected the password response (code 0x35). No automatic password retries were made."
+        case .unexpectedAuthenticationReply(let stage, let count):
+            "Unexpected authentication reply during \(stage) (\(count) payload bytes). This is not an explicit password rejection."
         case .passwordFormat: "Enter the BMS profile password using 1–8 ASCII characters."
         case .unsupportedLayout: "Profile reading currently supports the verified 3.x firmware layout. This firmware's profile layout is not supported."
         case .relockFailed: "The profile session could not be confirmed re-locked. The connection was closed. Check the BMS lock status with the manufacturer utility before continuing."
@@ -144,34 +147,31 @@ public enum ProfileDecoder {
 final class ProfileReader {
     let transport: any DiagnosticTransport
     init(transport: any DiagnosticTransport) { self.transport = transport }
-    func read(device: DeviceInfo, password: String?, progress: @Sendable (DownloadProgress) -> Void) throws -> ProfileSnapshot {
+    func read(device: DeviceInfo, password: String?, diagnostic: (String) -> Void = { _ in }, progress: @Sendable (DownloadProgress) -> Void) throws -> ProfileSnapshot {
+        diagnostic("Profile reader: 3.x / layout 3.0; authentication values omitted.")
         guard device.isDemo || device.firmware.flatMap({ FirmwareVersion(code:$0) })?.major == 3 else { throw ProfileAccessError.unsupportedLayout }
         let key = try password.map(ProfileDecoder.passwordKey)
         var needsRelock = false
         var didAuthenticate = false
         let result: Result<ProfileSnapshot, Error>
+        func exchange(_ request: ReadRequest, stage: String) throws -> WireReply {
+            try ProfileAuthentication.exchange(request,transport:transport,stage:stage,diagnostic:diagnostic)
+        }
         do {
             progress(.init(0, "Checking profile access…"))
             var locked = false
             do {
-                let status = try transport.exchange(.profileLockStatus)
+                let status = try exchange(.profileLockStatus,stage:"Lock status (0xB2/03)")
                 guard status.payload.count >= 2, status.payload[1] <= 1 else { throw BMSError.invalid("invalid profile lock status") }
                 locked = status.payload[1] == 0
+                diagnostic(locked ? "Profile is locked." : "Profile is unlocked.")
             } catch BMSError.unsupported { /* Older firmware may only report access on the read itself. */ }
             func authenticate() throws {
                 guard let key else { throw ProfileAccessError.passwordRequired }
                 needsRelock = true
                 progress(.init(0, "Authenticating profile access…"))
-                do {
-                    let challenge = try transport.exchange(.profileChallenge)
-                    guard challenge.payload.count == 8 else { throw BMSError.invalid("invalid profile authentication challenge") }
-                    if challenge.payload.contains(where: { $0 != 0 }) {
-                        let response = zip(challenge.payload,key).map { $0 ^ $1 }
-                        let reply = try transport.exchange(.profileAuthenticate(response))
-                        guard reply.payload.count == 2, reply.payload.allSatisfy({ $0 == 0 }) else { throw ProfileAccessError.invalidPassword }
-                    }
-                    didAuthenticate = true
-                } catch BMSError.rejected(let code) where code == 0x35 { throw ProfileAccessError.invalidPassword }
+                try ProfileAuthentication.unlockProfile(transport:transport,key:key,diagnostic:diagnostic)
+                didAuthenticate = true
             }
             if locked { try authenticate() }
             var data: [UInt8] = []
@@ -193,12 +193,16 @@ final class ProfileReader {
             var notes = ["Complete profile bytes retained. Named settings cover the verified core prefix; other settings and tables remain in the raw backup. Raw values are labelled where display units are not verified."]
             if device.isDemo { notes.append("SYNTHETIC DEMO — no BMS profile was read.") }
             result = .success(.init(device:device,data:Data(data),settings:ProfileDecoder.settings(data),authenticated:didAuthenticate,notes:notes))
-        } catch { result = .failure(error) }
+        } catch {
+            diagnostic(error is CancellationError ? "Profile read cancelled." : "Profile read did not complete.")
+            result = .failure(error)
+        }
         if needsRelock {
             // Cleanup must run even when the downloading Task has been cancelled.
-            do { try transport.relockProfileSession() }
-            catch { transport.close(); throw ProfileAccessError.relockFailed }
+            do { try transport.relockProfileSession(); diagnostic("Session re-lock confirmed.") }
+            catch { diagnostic("Session re-lock not confirmed; transport closed."); transport.close(); throw ProfileAccessError.relockFailed }
         }
+        if case .success = result { diagnostic("Profile transfer and full checksum verified.") }
         return try result.get()
     }
 }
