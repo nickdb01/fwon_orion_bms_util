@@ -19,10 +19,13 @@ import BMSCore
 }
 @MainActor final class ApplicationDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
+    private let termination = TerminationCoordinator()
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let model else { return .terminateNow }
-        Task { await model.prepareToQuit(); sender.reply(toApplicationShouldTerminate:true) }
-        return .terminateLater
+        guard !termination.isReady, let model else { return .terminateNow }
+        termination.request(shutdown: { await model.prepareToQuit() }, onReady: { sender.terminate(nil) })
+        // Keep the normal event loop running while asynchronous cleanup finishes.
+        // A second terminate call, once ready, returns terminateNow above.
+        return .terminateCancel
     }
 }
 struct OrionDiagnosticsApp: App {
@@ -58,6 +61,7 @@ struct OrionDiagnosticsApp: App {
                 Button("Cancel Download") { model.cancel() }.keyboardShortcut(".").disabled(!model.busy)
                 Divider()
                 Button("Refresh Connections") { model.refreshPorts() }.disabled(model.busy)
+                Button("Explore Password-Protected Demo") { model.connect(demo:true,demoProfilePassword:"demo") }.disabled(model.busy || model.device != nil)
                 Button("Explore Offline Demo") { model.connect(demo: true) }.disabled(model.busy || model.device != nil)
             }
         }

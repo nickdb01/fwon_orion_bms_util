@@ -5,13 +5,31 @@ final class DemoTransport: DiagnosticTransport {
     private(set) var trace: [TraceEntry] = []
     private var closed = false
     private let signature: String
-    init(signature: String = "ORIONBMS08") { self.signature = signature }
+    private let profilePassword: String?
+    private var profileUnlocked = false
+    private let profileChallenge: [UInt8] = [0x12,0x23,0x34,0x45,0x56,0x67,0x78,0x19]
+    init(signature: String = "ORIONBMS08", profilePassword: String? = nil) { self.signature = signature; self.profilePassword = profilePassword }
     func close() { closed = true }
     func exchange(_ request: ReadRequest) throws -> WireReply {
         guard !closed else { throw BMSError.disconnected }
         try Task.checkCancellation()
         let body: [UInt8]
         switch request {
+        case .profileLockStatus: body = [0xF2,3,0,(profilePassword == nil || profileUnlocked) ? 1 : 0]
+        case .profileChallenge: body = [0x67,5] + (profilePassword == nil || profileUnlocked ? [UInt8](repeating:0,count:8) : profileChallenge)
+        case .profileAuthenticate(let response):
+            let key = try ProfileDecoder.passwordKey(profilePassword ?? "demo")
+            guard response == zip(profileChallenge,key).map({ $0 ^ $1 }) else { throw BMSError.rejected(0x35) }
+            profileUnlocked = true; body = [0x67,6,0,0]
+        case .profileRelock: profileUnlocked = false; body = [0x60,0]
+        case .profileBlock(let offset, let count):
+            guard profilePassword == nil || profileUnlocked else { throw BMSError.rejected(0x33) }
+            let profile = Self.profileData()
+            guard count > 0, count <= 56, Int(offset) + Int(count) <= profile.count else { throw BMSError.invalid("invalid profile block") }
+            let descriptor: [UInt8] = [0,count,UInt8(offset >> 8),UInt8(truncatingIfNeeded:offset)]
+            let data = Array(profile[Int(offset)..<(Int(offset)+Int(count))])
+            let checksum = (descriptor + data).reduce(0) { $0 + Int($1) }
+            body = [0x7C] + descriptor + data + [UInt8(checksum >> 8),UInt8(truncatingIfNeeded:checksum)]
         case .identify: body = [0x49, 0x0B, 1] + Array(signature.utf8)
         case .serialNumber: body = [0x49, 0x0A, 0] + Array("DEMO0001".utf8)
         case .firmware: body = [0x49, 4, 1] + Array("DEMO01".utf8)
@@ -80,9 +98,21 @@ final class DemoTransport: DiagnosticTransport {
         }
         let raw = [UInt8(body.count)] + body
         if trace.count > 8000 { trace.removeFirst(1000) }
-        trace.append(.init(direction: "TX", text: ":" + request.body.hex))
-        trace.append(.init(direction: "RX-DEMO", text: ":" + raw.hex))
+        trace.append(.init(direction: "TX", text: request.isAuthentication ? "[profile authentication redacted]" : ":" + request.body.hex))
+        trace.append(.init(direction: "RX-DEMO", text: request.isAuthentication ? "[profile authentication redacted]" : ":" + raw.hex))
         var parser = FrameParser()
         return try parser.feed(Data((":" + raw.hex + "\r\n").utf8))[0].get()
     }
+    static func profileData() -> [UInt8] {
+        var bytes = [UInt8](repeating:0,count:ProfileDecoder.byteCount)
+        let values: [String:UInt32] = ["TotalAmphours":1000,"MaximumCellVoltage":36500,"MinimumCellVoltage":28000,"MaximumPackVoltage":584,"MinimumPackVoltage":448,"MaximumCCL":50,"MaximumDCL":120,"ChargedSOC":200,"DepletedSOC":0,"BalanceVoltage":34000,"BalanceDeltaVoltage":100]
+        for field in ProfileDecoder.fields {
+            let value = values[field.name] ?? 0
+            for i in 0..<field.width { bytes[field.offset+i] = UInt8(truncatingIfNeeded:value >> ((field.width-i-1)*8)) }
+        }
+        let checksum = bytes.dropLast(4).reduce(0x1234) { $0 + Int($1) }
+        for i in 0..<3 { bytes[bytes.count-3+i] = UInt8(truncatingIfNeeded:checksum >> ((2-i)*8)) }
+        return bytes
+    }
+
 }

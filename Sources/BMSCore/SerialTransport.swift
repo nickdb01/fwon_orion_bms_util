@@ -36,6 +36,13 @@ protocol DiagnosticTransport: AnyObject {
     var trace: [TraceEntry] { get }
     func exchange(_ request: ReadRequest) throws -> WireReply
     func close()
+    func relockProfileSession() throws
+}
+extension DiagnosticTransport {
+    func relockProfileSession() throws {
+        do { _ = try exchange(.profileRelock) }
+        catch BMSError.rejected(0x22) { /* Already locked, as handled by the reference utility. */ }
+    }
 }
 
 final class SerialTransport: DiagnosticTransport {
@@ -63,19 +70,30 @@ final class SerialTransport: DiagnosticTransport {
         if trace.count > 8000 { trace.removeFirst(1000) }
     }
     func exchange(_ request: ReadRequest) throws -> WireReply {
+        try performExchange(request, honourCancellation: true)
+    }
+    func relockProfileSession() throws {
+        do { _ = try performExchange(.profileRelock, honourCancellation: false) }
+        catch BMSError.rejected(0x22) { /* Already locked. */ }
+    }
+    private func performExchange(_ request: ReadRequest, honourCancellation: Bool) throws -> WireReply {
+        func checkCancellation() throws { if honourCancellation { try Task.checkCancellation() } }
+        func log(_ entry: TraceEntry) {
+            record(request.isAuthentication ? .init(direction: entry.direction, text: "[profile authentication redacted]") : entry)
+        }
         guard fd >= 0 else { throw BMSError.disconnected }
         var lastError: Error = BMSError.timeout
-        // Only idempotent diagnostic reads can reach this bounded retry path.
-        for attempt in 0..<2 {
-            try Task.checkCancellation()
-            if attempt > 0 { record(.init(direction: "NOTE", text: "Retrying \(request.body.hex)")) }
+        // Authentication is attempted once; reads and re-lock cleanup use bounded retries.
+        for attempt in 0..<(request.isAuthentication ? 1 : 2) {
+            try checkCancellation()
+            if attempt > 0 { log(.init(direction: "NOTE", text: "Retrying \(request.body.hex)")) }
             guard orion_serial_flush(fd) == 0 else { throw Self.systemError("Flush input") }
             let deadline = ProcessInfo.processInfo.systemUptime + timeout
             let bytes = Array(request.frame)
             var offset = 0
-            record(.init(direction: "TX", text: ":" + request.body.hex))
+            log(.init(direction: "TX", text: ":" + request.body.hex))
             while offset < bytes.count {
-                try Task.checkCancellation()
+                try checkCancellation()
                 guard ProcessInfo.processInfo.systemUptime < deadline else { throw BMSError.timeout }
                 let ready = orion_serial_wait(fd, 1, 50)
                 if ready < 0 { if errno == EINTR { continue }; throw Self.systemError("Wait to write") }
@@ -87,19 +105,19 @@ final class SerialTransport: DiagnosticTransport {
             var parser = FrameParser()
             var buffer = [UInt8](repeating: 0, count: 1024)
             while ProcessInfo.processInfo.systemUptime < deadline {
-                try Task.checkCancellation()
+                try checkCancellation()
                 let ready = orion_serial_wait(fd, 0, 50)
                 if ready < 0 { if errno == EINTR { continue }; throw Self.systemError("Wait for reply") }
                 if ready == 0 { continue }
                 let n = buffer.withUnsafeMutableBufferPointer { orion_serial_read(fd, $0.baseAddress!, $0.count) }
                 if n < 0 { if errno == EAGAIN || errno == EINTR { continue }; throw Self.systemError("Read") }
                 if n == 0 { continue }
-                record(.init(direction: "RX", text: Data(buffer.prefix(n)).map { String(format: "%02X", $0) }.joined()))
+                log(.init(direction: "RX", text: Data(buffer.prefix(n)).map { String(format: "%02X", $0) }.joined()))
                 for result in parser.feed(Data(buffer.prefix(n))) {
                     switch result {
                     case .failure(let error):
                         lastError = error
-                        record(.init(direction: "PARSE", text: error.localizedDescription))
+                        log(.init(direction: "PARSE", text: error.localizedDescription))
                     case .success(let reply):
                         if reply.service == 0x7F && reply.pid == request.service {
                             let reason = reply.payload[0]
@@ -108,7 +126,7 @@ final class SerialTransport: DiagnosticTransport {
                             throw BMSError.rejected(reason)
                         }
                         if request.matches(reply) { return reply }
-                        record(.init(direction: "SKIP", text: "Unmatched reply :" + reply.bytes.hex))
+                        log(.init(direction: "SKIP", text: "Unmatched reply :" + reply.bytes.hex))
                     }
                 }
             }

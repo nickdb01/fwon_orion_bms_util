@@ -81,7 +81,7 @@ struct ContentView: View {
                 }
             }
             .listStyle(.sidebar)
-            .frame(height: 245)
+            .frame(height: 282)
             .accessibilityLabel("Workspace")
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
@@ -142,7 +142,7 @@ struct ContentView: View {
                     Button { model.connect(demo: true) } label: { Label("Explore Offline Demo", systemImage: "play.circle") }
                         .buttonStyle(.borderless).disabled(model.busy)
                 }
-                Text("v0.2.5 · Hardware validation pending").font(.system(size: 10)).foregroundStyle(.tertiary)
+                Text("v0.3.1 · Hardware validation pending").font(.system(size: 10)).foregroundStyle(.tertiary)
             }
                 }.padding(20)
             }

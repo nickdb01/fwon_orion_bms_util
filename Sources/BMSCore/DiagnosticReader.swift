@@ -109,10 +109,10 @@ public actor DiagnosticService {
     private var liveReader: LiveReader?
     private var recorder: RecordingWriter?
     public init() {}
-    public func connect(path: String, demo: Bool = false) throws -> DeviceInfo {
+    public func connect(path: String, demo: Bool = false, demoProfilePassword: String? = nil) throws -> DeviceInfo {
         reader?.close(); reader = nil; liveReader = nil
         let transport: any DiagnosticTransport
-        if demo { transport = DemoTransport() }
+        if demo { transport = DemoTransport(profilePassword:demoProfilePassword) }
         else {
             guard SerialPortInfo.available().contains(where: { $0.path == path }) else {
                 throw BMSError.io("The selected serial port is no longer available. Refresh the port list.")
@@ -139,6 +139,16 @@ public actor DiagnosticService {
         guard let reader, let info = reader.device else { throw BMSError.disconnected }
         try recorder?.note("Live polling paused for historical statistics")
         return try HistoricalSnapshot.decode(reader.transport.exchange(.history), device:info)
+    }
+    public func readProfile(password: String? = nil, progress: @Sendable (DownloadProgress) -> Void) throws -> ProfileSnapshot {
+        guard let reader, let device = reader.device else { throw BMSError.disconnected }
+        try recorder?.note("Live polling paused for profile download")
+        do { return try ProfileReader(transport:reader.transport).read(device:device,password:password,progress:progress) }
+        catch {
+            if case ProfileAccessError.relockFailed = error { reader.close() }
+            if (error as? BMSError) == .disconnected { reader.close() }
+            throw error
+        }
     }
     public func isConnected() -> Bool { reader?.device != nil }
     public func disconnect() {

@@ -4,9 +4,9 @@ import UniformTypeIdentifiers
 import BMSCore
 
 enum WorkspacePage: String, CaseIterable, Identifiable {
-    case overview = "Overview", cells = "Cells", charts = "Live Charts", recordings = "Recordings", history = "History", diagnostics = "Diagnostics"
+    case overview = "Overview", cells = "Cells", charts = "Live Charts", recordings = "Recordings", history = "History", diagnostics = "Diagnostics", profile = "Profile"
     var id: String { rawValue }
-    var icon: String { switch self { case .overview: "gauge.with.dots.needle.50percent"; case .cells: "square.grid.2x2"; case .charts: "chart.xyaxis.line"; case .recordings: "record.circle"; case .history: "clock.arrow.circlepath"; case .diagnostics: "stethoscope" } }
+    var icon: String { switch self { case .overview: "gauge.with.dots.needle.50percent"; case .cells: "square.grid.2x2"; case .charts: "chart.xyaxis.line"; case .recordings: "record.circle"; case .history: "clock.arrow.circlepath"; case .diagnostics: "stethoscope"; case .profile: "doc.text.magnifyingglass" } }
 }
 
 enum ChartPreset: String, CaseIterable, Identifiable {
@@ -38,6 +38,10 @@ enum ChartPreset: String, CaseIterable, Identifiable {
     var selectedFaultDetail: FaultDetail?
     var page: WorkspacePage = .overview
     var isMonitoring = false
+    var profileSnapshot: ProfileSnapshot?
+    var profileDownloading = false
+    var profileNeedsPassword = false
+    var profileAuthMessage = "Enter the BMS profile password. It will not be saved."
     var history: HistoricalSnapshot?
     var latest: LiveSnapshot?
     var snapshots: [LiveSnapshot] = []
@@ -64,6 +68,7 @@ enum ChartPreset: String, CaseIterable, Identifiable {
         self.portProvider = portProvider; refreshPorts()
     }
     func refreshPorts(silent: Bool = false) {
+        guard !shuttingDown else { return }
         let found = portProvider()
         let change = PortDiscovery.reconcile(previous: ports, current: found, selected: selectedPort)
         ports = found; selectedPort = change.selectedPath
@@ -77,13 +82,14 @@ enum ChartPreset: String, CaseIterable, Identifiable {
     }
     func watchConnections() async {
         refreshPorts(silent: true)
-        while !Task.isCancelled {
+        while !Task.isCancelled, !shuttingDown {
             do { try await Task.sleep(for: .seconds(1)) } catch { return }
             refreshPorts(silent: true)
         }
     }
     func reconnect() {
-        guard !busy, let info = device else { refreshPorts(); return }
+        guard !shuttingDown else { return }
+        guard !shuttingDown, !busy, let info = device else { refreshPorts(); return }
         stopMonitoring(); busy = true
         operation = Task {
             await service.disconnect(); recordingURL = nil; device = nil; busy = false
@@ -91,8 +97,8 @@ enum ChartPreset: String, CaseIterable, Identifiable {
             connect(demo: info.isDemo)
         }
     }
-    func connect(demo: Bool = false) {
-        guard !busy, device == nil else { return }
+    func connect(demo: Bool = false, demoProfilePassword: String? = nil) {
+        guard !shuttingDown, !busy, device == nil else { return }
         busy = true; connecting = true; errorMessage = nil; progress = 0
         status = demo ? "Opening the offline demo…" : "Identifying the BMS…"
         let path = selectedPort
@@ -100,12 +106,12 @@ enum ChartPreset: String, CaseIterable, Identifiable {
         operation = Task {
             defer { busy = false; connecting = false; operation = nil }
             do {
-                let connected = try await service.connect(path: path, demo: demo)
+                let connected = try await service.connect(path: path, demo: demo, demoProfilePassword:demoProfilePassword)
                 try Task.checkCancellation()
                 guard generation == connectionGeneration else { throw CancellationError() }
-                device = connected; report = nil; sourceLabel = ""; query = ""
+                device = connected; profileSnapshot = nil; profileNeedsPassword = false; report = nil; sourceLabel = ""; query = ""
                 status = demo ? "Demo connected — all records are synthetic" : "Connected · ready to download"
-                latest = nil; snapshots = []; openedRecording = nil; page = .overview
+                latest = nil; snapshots = []; openedRecording = nil; page = demoProfilePassword == nil ? .overview : .profile
                 startMonitoring(force: true)
             } catch {
                 await service.disconnect()
@@ -116,7 +122,7 @@ enum ChartPreset: String, CaseIterable, Identifiable {
         }
     }
     func download() {
-        guard !busy, device != nil else { return }
+        guard !shuttingDown, !busy, device != nil else { return }
         let resume = isMonitoring
         stopMonitoring(); page = .diagnostics
         busy = true; progress = 0; errorMessage = nil; status = "Starting download…"
@@ -142,7 +148,7 @@ enum ChartPreset: String, CaseIterable, Identifiable {
     }
     func cancel() { operation?.cancel(); status = "Cancelling…" }
     func disconnect() {
-        guard !busy else { return }
+        guard !shuttingDown, !busy else { return }
         stopMonitoring(); connectionGeneration = UUID()
         busy = true
         operation = Task {
@@ -151,7 +157,7 @@ enum ChartPreset: String, CaseIterable, Identifiable {
         }
     }
     func openReport() {
-        guard !busy, device == nil else { return }
+        guard !shuttingDown, !busy, device == nil else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false
         panel.message = "Open an Orion Diagnostics JSON export"
@@ -235,7 +241,7 @@ extension AppModel {
         chartsPaused.toggle()
     }
     func startRecording() {
-        guard device != nil, recordingURL == nil, !busy else { return }
+        guard !shuttingDown, device != nil, recordingURL == nil, !busy else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "orionlog") ?? .data]
         panel.nameFieldStringValue = device?.isDemo == true ? "Orion-DEMO.orionlog" : "Orion-Recording.orionlog"
@@ -252,7 +258,7 @@ extension AppModel {
         }
     }
     func stopRecording() {
-        guard recordingURL != nil, !busy else { return }
+        guard !shuttingDown, recordingURL != nil, !busy else { return }
         busy = true
         operation = Task {
             defer { busy = false; operation = nil; recordingURL = nil }
@@ -261,7 +267,7 @@ extension AppModel {
         }
     }
     func openRecording(url supplied: URL? = nil) {
-        guard !busy, recordingURL == nil else { return }
+        guard !shuttingDown, !busy, recordingURL == nil else { return }
         let url: URL
         if let supplied { url = supplied }
         else {
@@ -301,7 +307,7 @@ extension AppModel {
 
 extension AppModel {
     func downloadHistory() {
-        guard !busy, device != nil else { return }
+        guard !shuttingDown, !busy, device != nil else { return }
         let resume = isMonitoring; stopMonitoring(); busy = true
         operation = Task {
             defer { busy = false; operation = nil; if resume && device != nil { startMonitoring() } }
@@ -322,15 +328,24 @@ extension AppModel {
 
 extension AppModel {
     func prepareToQuit() async {
-        shuttingDown = true; operation?.cancel(); stopMonitoring()
+        shuttingDown = true
+        connectionGeneration = UUID()
+        let pendingOperation = operation
+        let pendingMonitoring = monitoringTask
+        pendingOperation?.cancel(); stopMonitoring()
+        // Let cancelled profile reads re-lock before closing the transport, and
+        // prevent their completion handlers racing with the final disconnect.
+        await pendingOperation?.value
+        await pendingMonitoring?.value
         do { try await service.stopRecording() } catch { recordingMessages.append(error.localizedDescription) }
-        await service.disconnect(); recordingURL = nil
+        await service.disconnect(); recordingURL = nil; device = nil
+        profileNeedsPassword = false
     }
 }
 
 extension AppModel {
     func downloadFaultDetail() {
-        guard !busy, device != nil, let code = selectedFaultID else { return }
+        guard !shuttingDown, !busy, device != nil, let code = selectedFaultID else { return }
         let resume = isMonitoring; stopMonitoring(); busy = true; progress = 0
         operation = Task {
             defer { busy = false; operation = nil; if resume && device != nil { startMonitoring() } }
@@ -359,5 +374,55 @@ extension AppModel {
         let note = "Additional snapshots retain their own acquisition timestamps; this is not an atomic device snapshot."
         if (copy.liveSnapshot != nil || copy.historySnapshot != nil) && !copy.notes.contains(note) { copy.notes.append(note) }
         return copy
+    }
+}
+
+extension AppModel {
+    func downloadProfile(password: String? = nil) {
+        guard !shuttingDown, !busy, device != nil else { return }
+        let resume = isMonitoring
+        stopMonitoring(); busy = true; profileDownloading = true; progress = 0
+        profileNeedsPassword = false; errorMessage = nil
+        operation = Task {
+            defer {
+                busy = false; profileDownloading = false; operation = nil
+                if resume && device != nil { startMonitoring() }
+            }
+            do {
+                let result = try await service.readProfile(password:password) { [weak self] update in
+                    Task { @MainActor [weak self] in
+                        guard let self, self.profileDownloading else { return }
+                        self.progress = update.fraction; self.status = update.message
+                    }
+                }
+                profileSnapshot = result; progress = 1
+                status = result.device.isDemo ? "Synthetic demo profile downloaded" : "Profile downloaded · settings unchanged"
+            } catch {
+                if !(await service.isConnected()) { device = nil }
+                if let access = error as? ProfileAccessError {
+                    switch access {
+                    case .passwordRequired, .invalidPassword, .passwordFormat:
+                        profileAuthMessage = access.localizedDescription
+                        profileNeedsPassword = device != nil
+                        status = "Profile locked · password required"
+                    default: errorMessage = access.localizedDescription; status = "Profile download failed"
+                    }
+                } else if error is CancellationError { status = "Profile download cancelled · previous profile retained" }
+                else { errorMessage = error.localizedDescription; status = "Profile download failed · previous profile retained" }
+            }
+        }
+    }
+    func exportProfile() {
+        guard let profileSnapshot, !busy else { return }
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.json]
+        panel.nameFieldStringValue = "Orion-Profile.json"
+        panel.message = "Saves the complete downloaded profile and decoded core settings. This is a read-only backup, not a vendor .j2bms upload file."
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.prettyPrinted,.sortedKeys]
+            try encoder.encode(profileSnapshot).write(to:url,options:.atomic)
+            status = "Profile backup saved locally"
+        } catch { errorMessage = error.localizedDescription }
     }
 }

@@ -71,3 +71,72 @@ import Testing
         }
     }
 }
+
+@Test @MainActor func profileAuthenticationPromptAndRetryPreserveReadonlyWorkflow() async throws {
+    let model = AppModel(portProvider:{ [] })
+    model.connect(demo:true,demoProfilePassword:"demo")
+    for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
+    model.downloadProfile()
+    for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
+    #expect(model.profileNeedsPassword)
+    #expect(model.profileSnapshot == nil)
+    model.downloadProfile(password:"wrong")
+    for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
+    #expect(model.profileNeedsPassword)
+    #expect(model.profileSnapshot == nil)
+    model.downloadProfile(password:"demo")
+    for _ in 0..<100 { if !model.busy { break }; try await Task.sleep(for:.milliseconds(20)) }
+    #expect(!model.profileNeedsPassword)
+    #expect(model.profileSnapshot?.data.count == 3474)
+    #expect(model.profileSnapshot?.authenticated == true)
+    #expect(model.device?.isDemo == true)
+    await model.prepareToQuit()
+}
+
+@Test @MainActor func quittingFinishesCleanupOnceDespiteRepeatedRequests() async throws {
+    let coordinator = TerminationCoordinator()
+    var cleanups = 0
+    var replies = 0
+    for _ in 0..<3 {
+        coordinator.request(timeout: .milliseconds(150), shutdown: {
+            cleanups += 1
+            try? await Task.sleep(for: .milliseconds(20))
+        }, onReady: { replies += 1 })
+    }
+    try await Task.sleep(for: .milliseconds(200))
+    #expect(coordinator.isReady)
+    #expect(cleanups == 1)
+    #expect(replies == 1)
+}
+
+@Test @MainActor func quittingHasDeadlineEvenWhenCleanupIgnoresCancellation() async throws {
+    let coordinator = TerminationCoordinator()
+    var release: CheckedContinuation<Void, Never>?
+    var replies = 0
+    coordinator.request(timeout: .milliseconds(40), shutdown: {
+        await withCheckedContinuation { release = $0 }
+    }, onReady: { replies += 1 })
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(coordinator.isReady)
+    #expect(replies == 1)
+    release?.resume()
+    try await Task.sleep(for: .milliseconds(20))
+    #expect(replies == 1) // Late cleanup must not trigger termination twice.
+}
+
+@Test @MainActor func quittingCancelsConnectionAndPreventsReopening() async throws {
+    let model = AppModel(portProvider: { [] })
+    model.connect(demo: true)
+    await model.prepareToQuit()
+    #expect(model.device == nil)
+    #expect(!model.isMonitoring)
+    #expect(!model.busy)
+    model.connect(demo: true)
+    model.reconnect()
+    model.download()
+    model.downloadProfile()
+    try await Task.sleep(for: .milliseconds(100))
+    #expect(model.device == nil)
+    #expect(!model.isMonitoring)
+    #expect(!model.busy)
+}

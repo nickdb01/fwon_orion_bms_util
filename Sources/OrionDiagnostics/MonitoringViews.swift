@@ -24,7 +24,8 @@ struct MonitoringWorkspace: View {
             if model.openedRecording != nil {
                 Label("Saved recording · offline analysis", systemImage: "clock.arrow.circlepath").font(.caption).foregroundStyle(.secondary)
             }
-            if model.page == .recordings { recordings }
+            if model.page == .profile { ProfileWorkspace(model:model) }
+            else if model.page == .recordings { recordings }
             else if model.page == .history { history }
             else if model.latest == nil {
                 ContentUnavailableView {

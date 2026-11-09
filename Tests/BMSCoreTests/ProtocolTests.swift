@@ -236,3 +236,46 @@ private struct PseudoTerminal: Sendable {
     #expect(fault.statusText == "Active")
     #expect(DiagnosticDecoder.eventDescription(type: 4, parameter: 0x0A11).contains(fault.summary))
 }
+
+@Test func nativeProfileAuthenticationTraceRedactsBothDirectionsAndDoesNotRetry() async throws {
+    let pty = try PseudoTerminal(); defer { pty.close() }
+    let transport = try SerialTransport(path:pty.path,timeout:0.1,requireRTS:false)
+    defer { transport.close() }
+    let peer = Task.detached {
+        var buffer = [UInt8](repeating:0,count:100)
+        var pollDescriptor = pollfd(fd:pty.master,events:Int16(POLLIN),revents:0)
+        guard poll(&pollDescriptor,1,2000) > 0 else { throw BMSError.timeout }
+        _ = read(pty.master,&buffer,buffer.count)
+        let frame = Array(":0467060000\n".utf8)
+        _ = frame.withUnsafeBytes { Darwin.write(pty.master,$0.baseAddress!,$0.count) }
+    }
+    _ = try transport.exchange(.profileAuthenticate(Array("testpass".utf8)))
+    try await peer.value
+    #expect(transport.trace.contains { $0.direction == "TX" })
+    #expect(transport.trace.contains { $0.direction == "RX" })
+    #expect(transport.trace.allSatisfy { $0.text == "[profile authentication redacted]" })
+    #expect(throws:BMSError.timeout) { try transport.exchange(.profileChallenge) }
+    #expect(transport.trace.filter { $0.direction == "TX" }.count == 2)
+}
+
+@Test func nativeProfileRelockRunsEvenAfterTaskCancellation() async throws {
+    let pty = try PseudoTerminal(); defer { pty.close() }
+    let peer = Task.detached {
+        var buffer = [UInt8](repeating:0,count:100)
+        var descriptor = pollfd(fd:pty.master,events:Int16(POLLIN),revents:0)
+        guard poll(&descriptor,1,2000) > 0 else { throw BMSError.timeout }
+        let n = read(pty.master,&buffer,buffer.count)
+        let received = String(bytes:buffer.prefix(max(0,n)),encoding:.ascii)
+        let frame = Array(":026000\n".utf8)
+        _ = frame.withUnsafeBytes { Darwin.write(pty.master,$0.baseAddress!,$0.count) }
+        return received
+    }
+    let cleanup = Task.detached {
+        let transport = try SerialTransport(path:pty.path,timeout:0.3,requireRTS:false)
+        defer { transport.close() }
+        withUnsafeCurrentTask { $0?.cancel() }
+        try transport.relockProfileSession()
+    }
+    try await cleanup.value
+    #expect(try await peer.value == "\r:022000\n\r")
+}

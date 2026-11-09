@@ -18,8 +18,8 @@ cat > "$ORION_APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Orion Diagnostics</string>
 <key>CFBundleDisplayName</key><string>Orion Diagnostics</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.5</string>
-<key>CFBundleVersion</key><string>9</string>
+<key>CFBundleShortVersionString</key><string>0.3.1</string>
+<key>CFBundleVersion</key><string>11</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>

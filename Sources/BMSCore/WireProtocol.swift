@@ -1,23 +1,34 @@
 import Foundation
 
-// The only requests the app can send. There is no arbitrary-command interface.
+// Allowlisted reads plus profile authentication/session cleanup; no configuration writes.
 public enum ReadRequest: Equatable, Sendable {
     case identify, serialNumber, firmware, faults(FaultStatus), eventHeader, event(UInt8)
     case history
+    case profileLockStatus, profileChallenge, profileAuthenticate([UInt8]), profileRelock
+    case profileBlock(offset: UInt16, count: UInt8)
     case subcodes(UInt16), freezeDirectory(UInt8), freezeParameter(UInt8, ParameterPID)
     case parameter(ParameterPID), cells(CellQuantity, UInt8), cellFlag(CellFlag)
     public var service: UInt8 {
-        switch self { case .identify, .serialNumber, .firmware: 9; case .faults(let s): s.service; case .eventHeader, .event, .history: 0xB3; case .parameter, .cells: 0x22; case .cellFlag: 0xB0; case .subcodes: 0x17; case .freezeDirectory, .freezeParameter: 2 }
+        switch self { case .profileLockStatus: 0xB2; case .profileChallenge, .profileAuthenticate: 0x27; case .profileRelock: 0x20; case .profileBlock: 0x3C; case .identify, .serialNumber, .firmware: 9; case .faults(let s): s.service; case .eventHeader, .event, .history: 0xB3; case .parameter, .cells: 0x22; case .cellFlag: 0xB0; case .subcodes: 0x17; case .freezeDirectory, .freezeParameter: 2 }
     }
     public var pid: UInt16? {
-        switch self { case .identify: 0x0B; case .serialNumber: 0x0A; case .firmware: 4; case .faults: nil; case .history: 1; case .eventHeader, .event: 2; case .parameter(let p): p.rawValue; case .cells(let q, let b): q.rawValue + UInt16(b); case .cellFlag(let f): UInt16(f.rawValue); case .subcodes(let code): code; case .freezeDirectory(let frame), .freezeParameter(let frame,_): UInt16(frame) }
+        switch self { case .profileLockStatus: 3; case .profileChallenge: 5; case .profileAuthenticate: 6; case .profileRelock: 0; case .profileBlock: nil; case .identify: 0x0B; case .serialNumber: 0x0A; case .firmware: 4; case .faults: nil; case .history: 1; case .eventHeader, .event: 2; case .parameter(let p): p.rawValue; case .cells(let q, let b): q.rawValue + UInt16(b); case .cellFlag(let f): UInt16(f.rawValue); case .subcodes(let code): code; case .freezeDirectory(let frame), .freezeParameter(let frame,_): UInt16(frame) }
+    }
+    var isAuthentication: Bool {
+        switch self { case .profileChallenge, .profileAuthenticate: true; default: false }
     }
     public var body: [UInt8] {
+        if case .profileBlock(let offset, let count) = self {
+            let descriptor: [UInt8] = [0, count, UInt8(offset >> 8), UInt8(truncatingIfNeeded: offset)]
+            let checksum = UInt16(0x3C + descriptor.reduce(0) { $0 + Int($1) })
+            return [7, 0x3C] + descriptor + [UInt8(checksum >> 8), UInt8(truncatingIfNeeded: checksum)]
+        }
         var bytes = [service]
         if let pid {
             if service == 0x22 || service == 0x17 { bytes.append(UInt8(pid >> 8)) }
             bytes.append(UInt8(truncatingIfNeeded: pid))
         }
+        if case .profileAuthenticate(let key) = self { bytes += key }
         if case .event(let index) = self { bytes.append(index) }
         if case .subcodes = self { bytes.append(0) }
         if case .freezeDirectory = self { bytes += [1,2] }
@@ -27,6 +38,9 @@ public enum ReadRequest: Equatable, Sendable {
     public var frame: Data { Data(("\r:" + body.hex + "\n\r").utf8) }
     public func matches(_ reply: WireReply) -> Bool {
         guard reply.service == service &+ 0x40 else { return false }
+        if case .profileBlock(let offset, let count) = self {
+            return reply.profileDescriptor == (UInt32(count) << 16 | UInt32(offset))
+        }
         guard let pid else { return true } // The response PID is the DTC count for these services.
         guard reply.pid == pid else { return false }
         switch self {
@@ -46,17 +60,19 @@ public struct WireReply: Equatable, Sendable {
     public let service: UInt8
     public let pid: UInt16
     public let payload: [UInt8]
+    public let profileDescriptor: UInt32?
     public init(bytes: [UInt8]) throws {
         guard bytes.count >= 3, Int(bytes[0]) == bytes.count - 1 else {
             throw BMSError.invalid("frame length does not match its content")
         }
-        guard [UInt8(0x43), 0x47, 0x4A, 0x49, 0xF3, 0x7F, 0x62, 0xF0, 0x42, 0x57].contains(bytes[1]) else {
+        guard [UInt8(0x43), 0x47, 0x4A, 0x49, 0xF3, 0x7F, 0x62, 0xF0, 0x42, 0x57, 0xF2, 0x67, 0x60, 0x7C].contains(bytes[1]) else {
             throw BMSError.invalid("unexpected response service")
         }
-        let width = (bytes[1] == 0x62 || bytes[1] == 0x57) ? 2 : 1
+        let width = bytes[1] == 0x7C ? 4 : (bytes[1] == 0x62 || bytes[1] == 0x57) ? 2 : 1
         guard bytes.count >= 2 + width else { throw BMSError.invalid("missing response PID") }
         self.bytes = bytes; service = bytes[1]
-        pid = width == 2 ? UInt16(bytes[2]) << 8 | UInt16(bytes[3]) : UInt16(bytes[2])
+        profileDescriptor = width == 4 ? bytes[2..<6].reduce(UInt32(0)) { $0 << 8 | UInt32($1) } : nil
+        pid = width == 4 ? UInt16(truncatingIfNeeded: profileDescriptor!) : width == 2 ? UInt16(bytes[2]) << 8 | UInt16(bytes[3]) : UInt16(bytes[2])
         payload = Array(bytes.dropFirst(2 + width))
         if service == 0x7F && payload.isEmpty { throw BMSError.invalid("missing rejection reason") }
     }
